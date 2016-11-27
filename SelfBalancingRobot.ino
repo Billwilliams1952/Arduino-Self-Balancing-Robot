@@ -44,7 +44,7 @@
 #include <ky-040.h>             // Rotary encoder used for setting PID's
 #include <Lpf.h>                // Low Pass Filter for reading True/Magnetic North
 
-#define   DEBUG_TERMINAL
+#define   DEBUG_TERMINAL        // Is there a terminal connected to the robot?
 #ifdef DEBUG_TERMINAL
   #define   PRINT(str)              Serial.print((str));
   #define   PRINTLN(str)            Serial.println((str));
@@ -58,17 +58,17 @@
 
 /* Loop timing data */
 #define LOOP_TIME_MSEC        20    // 50Hz loop time to start.....
+#define SAMPLE_TIME           ((float)LOOP_TIME_MSEC / 1000.0)
 #define ONE_SEC_COUNT         (1000 / LOOP_TIME_MSEC)
 #define QUARTER_SEC_COUNT     (250 / LOOP_TIME_MSEC)
 
 /* LPF Setups */
-#define LPF_BANDWIDTH_HZ       10   // 10Hz BW - 50 Hz sample rate
-#define SAMPLE_TIME            ((float)LOOP_TIME_MSEC / 1000.0)
+#define LPF_BANDWIDTH_HZ      10    // 10Hz BW - 50 Hz sample rate
 
-/* Robot maximums */
+/* Robot angles */
+#define LEVEL_ANGLE            0    // Compensation if the sensor is not level
 #define ALMOST_UPRIGHT        10    // +/- 10 deg to upright is good enough
 #define PITCH_TOO_GREAT       50    // if abs(pitch) > this, then STOP!!
-#define LEVEL_ANGLE            0    // Compensate if the sensor is not level
 
 #define STUTTER_MOTOR_AMOUNT  20    // Stutter the motor when ready to raise
 
@@ -109,9 +109,6 @@ Kalman kalmanX;                // Create the Kalman instances
 Kalman kalmanY;
 float kalAngleX, kalAngleY;    // Calculated angle using a Kalman filter
 float pitch, roll;             // Calculated pitch and roll values
-
-/* Loop timing */
-float  deltaTime = 1.0 / LOOP_TIME_MSEC;   // time between loop updates in seconds
 
 /* Create PID and assign Tuning Parameters */
 float targetAngle = LEVEL_ANGLE, pwmAmount;
@@ -274,11 +271,11 @@ void loop() {
         kalmanX.setAngle(roll);
         kalAngleX = roll;
     } else
-        kalAngleX = kalmanX.getAngle(roll, gyro.gyro.x, deltaTime);
+        kalAngleX = kalmanX.getAngle(roll, gyro.gyro.x, SAMPLE_TIME);
   
     if ( abs(kalAngleX) > 90 )
         gyro.gyro.y = -gyro.gyro.y; // Invert rate, so it fits the restriced accelerometer reading
-    kalAngleY = kalmanY.getAngle(pitch, gyro.gyro.y, deltaTime);
+    kalAngleY = kalmanY.getAngle(pitch, gyro.gyro.y, SAMPLE_TIME);
 
     if ( inStartup ) {
         /* If we're in startup, then determine when we are close enough to 
