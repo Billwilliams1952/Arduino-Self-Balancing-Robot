@@ -10,9 +10,9 @@
  * The Rotary Encoder is a KY-040.
  * The display is a <TODO: TBD>.
  * The motors are 12V motors <TODO: part number>. 
- * Wheels are <TODO: part number>.
- * The processor is an Arduino Micro.
- * The batter is a <TODO: description and part number>.
+ * Wheels are Pololu <TODO: size and part number>.
+ * The processor is an Arduino Nano.
+ * The battery is a <TODO: description and part number>.
  * 
  * Several key libraries are used. Kalman and PID_V1.  
  * Kalman found at: https://github.com/TKJElectronics/KalmanFilter
@@ -31,23 +31,24 @@
  *
  * This code is in the public domain.
  * 
- * Code found at:
+ * Code found at: https://github.com/Billwilliams1952/Arduino-Self-Balancing-Robot
  * 
  */
 
 #include <SPI.h>
 #include <Wire.h>
+#include <SoftwareSerial.h>
 #include <Adafruit_Sensor.h>    // Do I really need this?
 #include <Adafruit_LSM9DS0.h>   
 #include <Kalman.h>             // Source: https://github.com/TKJElectronics/KalmanFilter
-#include <PID_v1.h>
+#include <PID_v1.h>             // Source: https://github.com/br3ttb/Arduino-PID-Library
 #include <ky-040.h>             // Rotary encoder used for setting PID's
 #include <Lpf.h>                // Low Pass Filter for reading True/Magnetic North
 
 #define   DEBUG_TERMINAL        // Is there a terminal connected to the robot?
 #ifdef DEBUG_TERMINAL
-  #define   PRINT(str)              Serial.print((str));
-  #define   PRINTLN(str)            Serial.println((str));
+  #define   PRINT(str)          Serial.print((str));
+  #define   PRINTLN(str)        Serial.println((str));
 #else
   #define   PRINT(str)
   #define   PRINTLN(str)
@@ -69,6 +70,7 @@
 #define LEVEL_ANGLE            0    // Compensation if the sensor is not level
 #define ALMOST_UPRIGHT        10    // +/- 10 deg to upright is good enough
 #define PITCH_TOO_GREAT       50    // if abs(pitch) > this, then STOP!!
+#define INTEGRATION_GUARD     10    // Maximum allowed integration error over time
 
 #define STUTTER_MOTOR_AMOUNT  20    // Stutter the motor when ready to raise
 
@@ -90,10 +92,17 @@
 #define   RIGHT_WHEEL_AIA    10   // Right Wheel is MotorA PORTB
 #define   RIGHT_WHEEL_AIB    11   // PORTB
 
+/* Status indicators */
 #define   STATUS_LED         13   // PORTB 0x00100000
 #define   PORTB_STATUS_LED   B00100000    // Not working?
 
-/* Create a sensor. Assign a unique base ID for this sensor */   
+/* Power monitor pins */
+#define   BATTERY_12V        A0   // 12V Battery pack
+#define   SUPPLY_7_5V        A1   // Input to Arduino Nano 7.5V
+
+/* Create a sensor. Assign a unique base ID for this sensor   
+ * Uses SDA (A4) and SCL (A5) for communication
+ */
 Adafruit_LSM9DS0 lsm = Adafruit_LSM9DS0(1000);  // Use I2C, ID #1000
 sensors_event_t accel, mag, gyro, temp;
 float heading;                // Heading calculated from mag data
@@ -102,18 +111,19 @@ float heading;                // Heading calculated from mag data
 ky040 pidEncoder(ENCODER_CLK, ENCODER_DT, ENCODER_SW, MAX_ROTARIES );
 uint8_t activeRotaryPid = KP_ROT;
 /* PID terms that are read from the rotary encoder pidEncoder */
-float KpVal = 0.0, KiVal = 0.0, KdVal = 0.0;
+float KpVal = 5.0, KiVal = 0.0, KdVal = 0.0;
 
 /* Create the Kalman filter instances */
-Kalman kalmanX;                // Create the Kalman instances
-Kalman kalmanY;
-float kalAngleX, kalAngleY;    // Calculated angle using a Kalman filter
+Kalman kalmanRoll;                // Create the Kalman instances
+Kalman kalmanPitch;
+float kalmanRollAngle, kalmanPitchAngle;    // Calculated angle using a Kalman filter
 float pitch, roll;             // Calculated pitch and roll values
 
 /* Create PID and assign Tuning Parameters */
-float targetAngle = LEVEL_ANGLE, pwmAmount;
+float targetAngle = LEVEL_ANGLE, pwmAmount,
+      lastError = 0.0, integratedError = 0.0;
 /* Specify the links and initial tuning parameters */
-PID myPID((double *)&pitch, (double *)&pwmAmount, (double *)&targetAngle, 
+PID myPID((double *)&kalmanPitchAngle, (double *)&pwmAmount, (double *)&targetAngle, 
           (double)KpVal, (double)KiVal, (double)KdVal, DIRECT);
 
 /* Create a low pass filter. */
@@ -124,9 +134,17 @@ LPF lpf(LPF_BANDWIDTH_HZ,SAMPLE_TIME);
  * ----------------------------------------------------------------------
  */
 void setup ( void ) {
-  
+
+    pinMode(STATUS_LED,OUTPUT);
+    digitalWrite(STATUS_LED,HIGH);          // Drives lamp OFF
+    
 #ifdef DEBUG_TERMINAL
-    while ( !Serial ) ;     // Wait for terminal
+    while ( !Serial ) {
+        digitalWrite(STATUS_LED, LOW);      // Wait for terminal
+        delay(100);
+        digitalWrite(STATUS_LED, HIGH);     // Wait for terminal
+        delay(100);        
+    }
     /* We could wait a specific time for the terminal and if none is
      * there, just move on.
      */
@@ -134,20 +152,18 @@ void setup ( void ) {
 #endif
 
     /* Setup for a LCD display mounted on the robot */
-    Serial1.begin(9600);
+    //Serial1.begin(9600);
     /* Clear the screen, setup for fast baudrate, switch to it */
 
-    /* Define rotaries for PID terms. 0.0 to 100.0 (divide reading by 10)
+    /* Define rotaries for PID terms. 0.0 to 50.0 (divide reading by 10)
      * This may have to change.... need more resolution
      */
-    pidEncoder.AddRotaryCounter(KP_ROT, 0, 0, 1000, 1, false );
-    pidEncoder.AddRotaryCounter(KI_ROT, 0, 0, 1000, 1, false );
-    pidEncoder.AddRotaryCounter(KD_ROT, 0, 0, 1000, 1, false );
+    pidEncoder.AddRotaryCounter(KP_ROT, 250, 0, 2500, 1, false ); // Value of 5 at 0.02/click
+    pidEncoder.AddRotaryCounter(KI_ROT, 0, 0, 2500, 1, false );
+    pidEncoder.AddRotaryCounter(KD_ROT, 0, 0, 2500, 1, false );
     pidEncoder.SetRotary(activeRotaryPid);
-
-    pinMode(STATUS_LED,OUTPUT);
-    digitalWrite(STATUS_LED,HIGH);      // Drives lamp OFF
-  
+    pidEncoder.SetChanged(KP_ROT);
+ 
     /* Setup motor driver */
     pinMode(LEFT_WHEEL_BIA,OUTPUT);
     digitalWrite(LEFT_WHEEL_BIA,LOW);
@@ -164,7 +180,12 @@ void setup ( void ) {
       /* We need to do some kind of error display -- blink LED very
        * fast?  Write something to Serial1?
        */
-      while(1);   // Halt and catch fire
+      while(1) {
+          digitalWrite(STATUS_LED,LOW); // Halt and catch fire
+          delay(50);
+          digitalWrite(STATUS_LED,HIGH); // Halt and catch fire
+          delay(50);          
+      }
     }
     PRINTLN(F("LSM9DS0 9DOF Init ok..."));
     lsm.setupAccel(lsm.LSM9DS0_ACCELRANGE_2G);
@@ -180,16 +201,17 @@ void setup ( void ) {
     PRINTLN(F("Accelerometer / gyro stabilization.... wait 5 seconds"));
     delay(5000);
 
+    lsm.getEvent(&accel, &mag, &gyro, &temp);
     /* Initialize Kalman filter - first get pitch and roll */
     roll  = atan2(accel.acceleration.y, accel.acceleration.z) * RADS_TO_DEG;
     pitch = atan(-accel.acceleration.x / 
         sqrt(accel.acceleration.y * accel.acceleration.y + 
              accel.acceleration.z * accel.acceleration.z)) * RADS_TO_DEG;
 
-    kalmanX.setAngle(roll); // Set starting angle
-    kalmanY.setAngle(pitch);
-    kalAngleX = roll;
-    kalAngleY = pitch;
+    kalmanRoll.setAngle(roll); // Set starting angle
+    kalmanPitch.setAngle(pitch);
+    kalmanRollAngle = roll;
+    kalmanPitchAngle = pitch;
     PRINTLN(F("Kalman filter setup..."));
 
     /* Initialize PID filter */
@@ -221,12 +243,11 @@ void setup ( void ) {
 
 /* ----------------------------------------------------------------------
  * Main execution loop. Basic execution is as follows:
- *    Declare static variable for loop timing of 50 Hz (20 msec)
- *    Start timer
+ *    Start timer for deltaTime calculation
  *    Get raw sensor data, accel x, y, x - gyro x, y, z
  *    Convert to pitch and roll
- *    Run through Kalman filter for KalmanPitch KalmanRoll
- *    Run through PID to get motor drive
+ *    Run through Kalman filter for kalmanPitchAngle kalmanRollAngle
+ *    Run through PID to get motor drive pwmAmount
  *    Set motors
  *    Update display/read inputs 4 times a second
  *    Update (what??) every second
@@ -265,17 +286,17 @@ void loop() {
      */
 
     /* This fixes the transition problem when the accelerometer angle jumps between 
-     * -180 and 180 degrees 
+     * -180 and 180 degrees .  IS THIS NEEDED ???
      */
-    if ( (roll < -90 && kalAngleX > 90) || (roll > 90 && kalAngleX < -90) ) {
-        kalmanX.setAngle(roll);
-        kalAngleX = roll;
+    if ( (roll < -90 && kalmanRollAngle > 90) || (roll > 90 && kalmanRollAngle < -90) ) {
+        kalmanRoll.setAngle(roll);
+        kalmanRollAngle = roll;
     } else
-        kalAngleX = kalmanX.getAngle(roll, gyro.gyro.x, SAMPLE_TIME);
+        kalmanRollAngle = kalmanRoll.getAngle(roll, gyro.gyro.x, SAMPLE_TIME);
   
-    if ( abs(kalAngleX) > 90 )
+    if ( abs(kalmanRollAngle) > 90 )
         gyro.gyro.y = -gyro.gyro.y; // Invert rate, so it fits the restriced accelerometer reading
-    kalAngleY = kalmanY.getAngle(pitch, gyro.gyro.y, SAMPLE_TIME);
+    kalmanPitchAngle = kalmanPitch.getAngle(pitch, gyro.gyro.y, SAMPLE_TIME);
 
     if ( inStartup ) {
         /* If we're in startup, then determine when we are close enough to 
@@ -283,12 +304,12 @@ void loop() {
          * THIS is where we need to give some visual / audible indication
          * that we're close enough
          */  
-         if ( abs(pitch) < ALMOST_UPRIGHT ) {
+         if ( abs(kalmanPitchAngle) < ALMOST_UPRIGHT ) {
             PRINTLN(F("Robot upright... starting autobalance"));
             inStartup = false;   
          }    
     } else {  // We are in autoBalance mode
-        if ( abs(pitch) > PITCH_TOO_GREAT ) {
+        if ( abs(kalmanPitchAngle) > PITCH_TOO_GREAT ) {
             /* we are falling over. Can't compensate. */
             SetMotors(0,0);      // Turn off motors and fall
             PRINTLN(F("***** Pitch too great. reentering Startup mode. *****"));
@@ -296,13 +317,17 @@ void loop() {
             inStartup = true;
             delay(2000);        // let everything fall down.
         } else {   
-             /* Computer error between pitch and targetAngle. Return a pwmAmount in
-              * the range of -255 (full backwards) to 255 (full forwards)
-              */
+            /* Computer error between kalmanPitchAngle and targetAngle. Return a 
+             * pwmAmount in the range of -255 (full backwards) to 255 (full forwards)
+             */
             myPID.Compute();
-            /* How do we inject a turn or movement command into the PID?
+            /* How do we inject a turn or movement command into the PID? Break the 
+             * PID into PD and PI calculations? To move, we need to set the 
+             * angle of the robot to 'lean' into the movement.  Maybe that's how we
+             * move. Program a lean angle to cause movement. -Check on this -----
              * If all well and good - set motors to PWM amounts
              */
+            /* Should we watch for runaway conditions? What woulld that entail? */
             SetMotors(pwmAmount,pwmAmount);
         }
         
@@ -368,7 +393,7 @@ void SetMotors ( int16_t leftPwmAmount, int16_t rightPwmAmount ) {
         // PORTB &= ~B00000010; 
         digitalWrite(LEFT_WHEEL_BIB,LOW);
         analogWrite(LEFT_WHEEL_BIA,-leftPwmAmount);
-    }
+    }  
     else {
         // PORTD &= ~B01000000;
         digitalWrite(LEFT_WHEEL_BIA,LOW);
@@ -378,27 +403,36 @@ void SetMotors ( int16_t leftPwmAmount, int16_t rightPwmAmount ) {
     if ( rightPwmAmount > 0 ) {
         // PORTB &= ~B00000100; 
         digitalWrite(RIGHT_WHEEL_AIB,LOW);
-        analogWrite(RIGHT_WHEEL_AIA,-rightPwmAmount);
+        analogWrite(RIGHT_WHEEL_AIA,rightPwmAmount);
     }
     else {
         // PORTB &= ~B00001000; 
-        digitalWrite(RIGHT_WHEEL_AIB,LOW);
-        analogWrite(RIGHT_WHEEL_AIA,rightPwmAmount); 
+        digitalWrite(RIGHT_WHEEL_AIA,LOW);
+        analogWrite(RIGHT_WHEEL_AIB,-rightPwmAmount); 
     }                  
 }
 
-#if 0   // Simple PID --- may use this instead of PID_v1
-// Only care about Pitch angle - right?? Can Pitch and Roll but not Yaw
-int updatePid ( int targetPosition, int currentPosition )   {
-  int error = targetPosition - currentPosition;
+#if 0   
+/* 
+ * Simple PID --- may use this instead of PID_v1
+ */
+int UpdatePIDandReturnMotorPWM ( void ) {
+    float deltaError, error;
+    
+    error = targetAngle - pitch;
+    
+    integratedError += error;
+    if ( integratedError > INTEGRATION_GUARD )
+        integratedError = INTEGRATION_GUARD;
+    else if ( integratedError < -INTEGRATION_GUARD )
+        integratedError = -INTEGRATION_GUARD;
   
-  pTerm = Kp * error;
-  integrated_error += error;
-  iTerm = Ki * constrain(integrated_error, -255, 255);
-  dTerm = Kd * (error - last_error);
-  last_error = error;
-  // K is an overal gain factor......
-  return -constrain(K*(pTerm + iTerm + dTerm), -255, 255);
+    deltaError = error - lastError;
+    lastError = error;
+  
+    return constrain(KpVal * error + 
+                     KiVal * integratedError + 
+                     KdVal * deltaError, -255, 255);   // PWM < 0 means go backwards
 }
 #endif
 
@@ -414,19 +448,24 @@ void CallFourTimesASecond ( void ) {
         pidEncoder.SetRotary(activeRotaryPid);
     }
     if ( pidEncoder.HasRotaryValueChanged(KP_ROT) ) {
-        KpVal = (float)pidEncoder.GetRotaryValue(KP_ROT) / 10.0;  
+        KpVal = (float)pidEncoder.GetRotaryValue(KP_ROT) * 0.02;  
     }
     if ( pidEncoder.HasRotaryValueChanged(KI_ROT) ) {
-        KiVal = (float)pidEncoder.GetRotaryValue(KI_ROT) / 10.0;       
+        KiVal = (float)pidEncoder.GetRotaryValue(KI_ROT) * 0.01;       
     }
     if ( pidEncoder.HasRotaryValueChanged(KD_ROT) ) {
-        KdVal = (float)pidEncoder.GetRotaryValue(KD_ROT) / 10.0;       
+        KdVal = (float)pidEncoder.GetRotaryValue(KD_ROT) * 0.02;       
     }
-   // myPID.SetTunings(KpVal, KiVal, KdVal);
+    //myPID.SetTunings(KpVal, KiVal, KdVal);
     
     /* Update lastest Pitch and Roll data */
-    PRINT(F("Pitch: ")); PRINT(pitch); PRINT(F("\tRoll: ")); PRINTLN(roll);
-    PRINT(F("PWM: ")); PRINTLN(pwmAmount);
+    //PRINT(F("GYRO Pitchrate: ")); PRINT(gyro.gyro.y); PRINTLN(F(" deg/sec"));
+    //PRINT(F("Raw Pitch: ")); PRINT(pitch); 
+    PRINT(F("Pitch: ")); PRINTLN(kalmanPitchAngle);
+    //PRINT(F("GYRO Rollrate: ")); PRINT(gyro.gyro.x); PRINTLN(F(" deg/sec"));
+    //PRINT(F("Raw Roll: ")); PRINT(roll); PRINT(F("\tKalman: ")); PRINTLN(kalmanRollAngle);     
+    //PRINT(F("\tRoll: ")); PRINTLN(kalmanRollAngle);
+    //PRINT(F("PWM: ")); PRINTLN(pwmAmount);
     /*
      * What about an autoincrementor for PID values? While a button is pressed
      * increment the value by 0.01 every XX msec.
@@ -441,10 +480,12 @@ void CallEverySecond ( void ) {
     digitalWrite(STATUS_LED,!digitalRead(STATUS_LED));
 
     /* Do a battery check every 10 seconds */
+    uint16_t reading = analogRead(BATTERY_12V);   // Resistor divider set for 13V max
+    reading = analogRead(SUPPLY_7_5V);            // Resistor divider set for 9V max
 
     /* Heading and temperature update every second */
 
-    PRINT(F("Heading: ")); PRINTLN(heading);
+    //PRINT(F("Heading: ")); PRINTLN(heading);
     /* Attach a servo with a pointer that points True North? */
   
     PRINT(F("Temp: ")); PRINT(temp.temperature); PRINTLN(F(" *C"));  
