@@ -202,17 +202,10 @@ void setup ( void ) {
     digitalWrite(STATUS_LED,HIGH);          // Drives lamp OFF
 
     pinMode(PID_EEPROM_WRITE,INPUT_PULLUP);
-    
+
+    /* Initialize the display (either OLED or terminal) */
     INIT_DISPLAY
     CLEAR_DISPLAY
-
-    /* Setup for a LCD display mounted on the robot */
-    //Serial1.begin(9600);
-    /* Clear the screen, setup for fast baudrate, switch to it */
-
-    /* Define rotaries for PID terms. 0.0 to 50.0 (divide reading by 10)/:_
-     * This may have to change.... need more resolution
-     */
 
 #ifdef INIT_EEPROM
     /* First time setup EEPROM */
@@ -322,7 +315,7 @@ void setup ( void ) {
  *    Update display/read inputs 4 times a second
  *    Update (what??) every second
  *    Calculate deltaTime for this pass
- *    delay ( 50 - deltaTime )
+ *    delay ( LOOP_TIME - deltaTime )
  * ----------------------------------------------------------------------
  */
 void loop() {
