@@ -292,12 +292,6 @@ void setup ( void ) {
         delay(100);
     }
     SetMotors(0,0);   // OFF 
-    
-    /* Now Set Balance LED OFF. As the user moves the robot upright, 
-     * increase the blink rate of the LED until within BALANCE_START.
-     * Then turn LED ON and start loop.
-     */
-    // code here.....
 
 #ifdef DEBUG_TERMINAL
     PRINTLN(F("***** Starting Balance loop"));
