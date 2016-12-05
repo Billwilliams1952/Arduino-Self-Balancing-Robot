@@ -30,12 +30,7 @@
  * the write function.
  * 
  * This program is free software: you can redistribute it and/or modify it under 
- * the terms of the GNU 
- * The Motor Shield (motor drive interface) is the SMAKN dual motor driver.
- * The Sensor is the LSM9DSO 9 degrees of freedom sensor.0.02
- *    3 axis acceleration, three axis gyroscope, 3 axis magnetic field, and temp sensor
- * The Rotary Encoder is a KY-040.
- * The display is a <TODO: TBD>.*General Public License as published by the Free Software Foundation,
+ * the terms of the GNU General Public License as published by the Free Software Foundation,
  * either version 3 of the License, or (at your option) any later version. 
  * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
  * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -62,7 +57,7 @@
 #include <ky-040.h>             // Rotary encoder used for setting PID's
 #include <Lpf.h>                // Low Pass Filter for reading True/Magnetic North
 
-//#define     INIT_EEPROM         // Only undefine if you REALLY want to overwrite EEPROM      
+//#define   INIT_EEPROM         // Only undefine if you REALLY want to overwrite EEPROM      
 //#define   FULL_DEBUG          // Lots of data printed out if using DEBUG_TERMINAL
 #define     OLED_SCREEN         // OLED screen in use?
 //#define   DEBUG_TERMINAL      // Terminal in use?
@@ -226,8 +221,9 @@ void setup ( void ) {
     EEPROM_writeInt ( KD_EEPROM_ADD, 0 );     // KdVal init to 0   
 #endif
 
+    /* Read PID values from EEPROM and initialize rotaries and Kvalues */
     int val = EEPROM_readInt ( KP_EEPROM_ADD );
-    pidEncoder.AddRotaryCounter(KP_ROT, val, 0, 2500, 1, false ); // Value of 5 at 0.02/click
+    pidEncoder.AddRotaryCounter(KP_ROT, val, 0, 2500, 1, false );
     KpVal = (float)val * KVALUE_MULTIPLIER;
     val = EEPROM_readInt ( KI_EEPROM_ADD );
     pidEncoder.AddRotaryCounter(KI_ROT, val, 0, 2500, 1, false );
@@ -527,8 +523,8 @@ int UpdatePIDandReturnMotorPWM ( void ) {
  * have changed. If so, update associated PID terms. Update any displays
  * attached to the robot.
  */
-void CallFourTimesASecond ( void ) {, updated = false
-    bool changed = false, updated = false;
+void CallFourTimesASecond ( void ) {
+    bool changed = false;
     if ( pidEncoder.SwitchPressed() ) {
         if ( ++activeRotaryPid > KD_ROT ) activeRotaryPid = KP_ROT;
         pidEncoder.SetRotary(activeRotaryPid);
@@ -551,9 +547,12 @@ void CallFourTimesASecond ( void ) {, updated = false
         EEPROM_writeInt(KP_EEPROM_ADD, (int)(KpVal / KVALUE_MULTIPLIER));
         EEPROM_writeInt(KI_EEPROM_ADD, (int)(KiVal / KVALUE_MULTIPLIER));
         EEPROM_writeInt(KD_EEPROM_ADD, (int)(KdVal / KVALUE_MULTIPLIER));
-        updated = true;
         while ( digitalRead(PID_EEPROM_WRITE) == LOW ) ;
-        delay(100);
+        CLEAR_DISPLAY
+        PRINT(F("PID values stored"));
+        SHOW_DISPLAY
+        changed = true;
+        delay(1000);
     }
 
 #ifdef OLED_SCREEN
