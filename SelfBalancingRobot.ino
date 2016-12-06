@@ -10,7 +10,7 @@
  * The Rotary Encoder is a KY-040.
  * The switch is a SPST pushbutton.
  * The display is a 128x32 OLED display. 
- * The motors are 12V motors <TODO: part number>. 
+ * The motors are Pololu 12V motors <TODO: part number>. 
  * Wheels are Pololu <TODO: size and part number>.
  * The processor is an Arduino Nano.
  * The battery is a <TODO: description and part number>.
@@ -49,13 +49,13 @@
 #include <SoftwareSerial.h>
 #include <EEPROM.h>
 #include <Adafruit_Sensor.h>    // Do I really need this?
-#include <Adafruit_LSM9DS0.h>   
-#include <Adafruit_GFX.h>
+#include <Adafruit_LSM9DS0.h>   // 9 DOF sensor
+#include <Adafruit_GFX.h>       // Graphics / text display
 #include <Adafruit_SSD1306.h>   // OLED display
-#include <Kalman.h>             // Source: https://github.com/TKJElectronics/KalmanFilter
-#include <PID_v1.h>             // Source: https://github.com/br3ttb/Arduino-PID-Library
-#include <ky-040.h>             // Rotary encoder used for setting PID's
-#include <Lpf.h>                // Low Pass Filter for reading True/Magnetic North
+#include <Kalman.h>             // Fuses accelerometer and gyro data
+#include <PID_v1.h>             // Control loop
+#include <ky-040.h>             // Rotary encoder used for setting PID terms
+#include <Lpf.h>                // Low Pass Filter for True/Magnetic North
 
 //#define   INIT_EEPROM         // Only undefine if you REALLY want to overwrite EEPROM      
 //#define   FULL_DEBUG          // Lots of data printed out if using DEBUG_TERMINAL
@@ -75,9 +75,9 @@
   #define   CLEAR_DISPLAY       display.clearDisplay(); display.setCursor(0,0);
   #define   INIT_DISPLAY        display.begin(SSD1306_SWITCHCAPVCC, 0x3C); \
                                 display.setTextSize(1); \
-                                display.setTextColor(WHITE);
+                                display.setTextColor(WHITE);  // Rotation ?
   #define   SHOW_DISPLAY        display.display();
-#else
+#else /* Nothing hooked up */
   #define   CLEAR_DISPLAY           
   #define   PRINT(str)
   #define   PRINTLN(str)
@@ -87,6 +87,7 @@
 
 /* Math stuff */
 #define   RADS_TO_DEG           57.295779513  // convert radians to degrees
+#define   ZERO                  0.0
 
 /* Loop timing data */
 #define   LOOP_TIME_MSEC        20    // 50Hz loop time to start.....
@@ -104,44 +105,45 @@
 #define   INTEGRATION_GUARD     10    // Maximum allowed integration error over time
 //#define USE_PITCH_AND_ROLL          // If defined, merge pitch and roll
 
-/* Encoder pins.http://forum.arduino.cc/index.php?topic=41497.0 One encoder is used for all three PID terms. I use my home grown
+/* Encoder pins. One encoder is used for all three PID terms. I use my home grown
  * library ky-040.
  */
-#define   ENCODER_CLK         2  
-#define   ENCODER_DT          4
-#define   ENCODER_SW          5
-#define   MAX_ROTARIES        3
-// Encoder rotary names
-#define   KP_ROT              0   // in numerical order to simplify code
-#define   KI_ROT              1
-#define   KD_ROT              2
-#define   KVALUE_MULTIPLIER   0.02
-#define   KP_EEPROM_ADD       0
-#define   KI_EEPROM_ADD       sizeof(int)
-#define   KD_EEPROM_ADD       (2 * sizeof(int))
-#define   PID_EEPROM_WRITE    8   // Active LOW switch    
+#define   ENCODER_CLK           2     // Clk interrupt. 0.47uF cap connected to ground 
+#define   ENCODER_DT            4     // data pin
+#define   ENCODER_SW            5     // switch pin
+#define   MAX_ROTARIES          3
+/* Encoder rotary names */
+#define   KP_ROT                0     // in numerical order to simplify code
+#define   KI_ROT                1
+#define   KD_ROT                2
+/* Multiplier and EEPROM addresses */
+#define   KVALUE_MULTIPLIER     0.02  // Convert to decimal multiplier
+#define   KP_EEPROM_ADD         0     // Addresses in EEPROM for PID terms
+#define   KI_EEPROM_ADD         sizeof(int)
+#define   KD_EEPROM_ADD         (2 * sizeof(int))
+#define   PID_EEPROM_WRITE      7     // Active LOW switch    
 
 /* Motor pins. These pins must support PWM using analogWrite */
-#define   LEFT_WHEEL_BIA      6   // Left Wheel is MotorB PORTD (0-7)
-#define   LEFT_WHEEL_BIB      9   // PORTB (8-13)
-#define   RIGHT_WHEEL_AIA    10   // Right Wheel is MotorA PORTB
-#define   RIGHT_WHEEL_AIB    11   // PORTB
+#define   LEFT_WHEEL_BIA        6     // Left Wheel is MotorB PORTD (0-7)
+#define   LEFT_WHEEL_BIB        9     // PORTB (8-13)
+#define   RIGHT_WHEEL_AIA       10    // Right Wheel is MotorA PORTB
+#define   RIGHT_WHEEL_AIB       11    // PORTB
 #define   STUTTER_MOTOR_AMOUNT  20    // Stutter the motor when ready to raise
 
 /* Status indicators and switches */
-#define   STATUS_LED         13   // PORTB 0x00100000
-#define   PORTB_STATUS_LED   B00100000    // Not working?
-#define   SELECTED           F(" <-")
-#define   NOT_SELECTED       F("")
+#define   STATUS_LED            13    // PORTB 0x00100000
+#define   PORTB_STATUS_LED      B00100000    // Not working?
+#define   SELECTED              F(" <-")
+#define   NOT_SELECTED          F("")
 
 #ifdef OLED_SCREEN
-    #define   OLED_RESET          4
+    #define   OLED_RESET        4
     Adafruit_SSD1306 display(OLED_RESET);
 #endif
 
 /* Power monitor pins */
-#define   BATTERY_12V        A0   // 12V Battery pack
-#define   SUPPLY_7_5V        A1   // Input to Arduino Nano 7.5V
+#define   BATTERY_12V           A0   // 12V Battery pack
+#define   SUPPLY_7_5V           A1   // Input to Arduino Nano 7.5V
 
 /* Create a sensor. Assign a unique base ID for this sensor   
  * Uses SDA (A4) and SCL (A5) for communication (Nano)
@@ -149,7 +151,7 @@
 Adafruit_LSM9DS0 sensor = Adafruit_LSM9DS0(1000);  // Use I2C, ID #1000
 sensors_event_t accel, mag, gyro, temp;
 #ifdef DEBUG_TERMINAL
-    float heading;                // Heading calculated from mag data
+    float heading;                /* Heading calculated from mag data */
 #endif
 
 /* Create an encoder with three rotaries for PID terms Kp, Ki, Kd */
@@ -157,23 +159,26 @@ ky040 pidEncoder(ENCODER_CLK, ENCODER_DT, ENCODER_SW, MAX_ROTARIES );
 uint8_t activeRotaryPid = KP_ROT;
 /* PID terms that are read from the rotary encoder pidEncoder */
 float KpVal, KiVal, KdVal;
+bool  rotaryChanging = false;   /* if true, motor is OFF and don't update */
 
 /* Create the Kalman filter instances */
 Kalman kalmanPitch;
-float kalmanPitchAngle;       // Calculated angle using a Kalman filter
-float pitch;                  // Calculated pitch values
+float kalmanPitchAngle;       /* Calculated pitch using a Kalman filter */
+float pitch;                  /* Calculated pitch from accelerometer */
 
 #ifdef USE_PITCH_AND_ROLL
-    Kalman kalmanRoll;           
-    float kalmanRollAngle,roll;   // Calculated roll angle
+    Kalman kalmanRoll;                   
+    float kalmanRollAngle,roll;
 #endif
 
 /* Create PID and assign Tuning Parameters */
-float targetAngle = 0.0, pwmAmount,
-      lastError = 0.0, integratedError = 0.0;
+float targetAngle = ZERO,     /* zero degrees is upright */  
+      pwmAmount,              /* value from -255 to 255 */
+      lastError = ZERO,       /* lastError calculated in PID */ 
+      integratedError = ZERO; /* Total integrated error */
 /* Specify the links and initial tuning parameters */
-PID myPID((double *)&kalmanPitchAngle, (double *)&pwmAmount, (double *)&targetAngle, 
-          (double)KpVal, (double)KiVal, (double)KdVal, DIRECT);
+//PID myPID((double *)&kalmanPitchAngle, (double *)&pwmAmount, (double *)&targetAngle, 
+//          (double)KpVal, (double)KiVal, (double)KdVal, DIRECT);
 
 #ifdef DEBUG_TERMINAL
     /* Create a low pass filter. */
@@ -203,7 +208,7 @@ void setup ( void ) {
 
     pinMode(PID_EEPROM_WRITE,INPUT_PULLUP);
 
-    /* Initialize the display (either OLED or terminal) */
+    /* Initialize the display (either OLED, terminal or none) */
     INIT_DISPLAY
     CLEAR_DISPLAY
 
@@ -214,7 +219,7 @@ void setup ( void ) {
     EEPROM_writeInt ( KD_EEPROM_ADD, 0 );     // KdVal init to 0   
 #endif
 
-    /* Read PID values from EEPROM and initialize rotaries and Kvalues */
+    /* Read PID terms from EEPROM and initialize rotaries and PID */
     int val = EEPROM_readInt ( KP_EEPROM_ADD );
     pidEncoder.AddRotaryCounter(KP_ROT, val, 0, 2500, 1, false );
     KpVal = (float)val * KVALUE_MULTIPLIER;
@@ -225,15 +230,14 @@ void setup ( void ) {
     pidEncoder.AddRotaryCounter(KD_ROT, val, 0, 2500, 1, false );
     KiVal = (float)val * KVALUE_MULTIPLIER;
     pidEncoder.SetRotary(activeRotaryPid);
-    pidEncoder.SetChanged(KP_ROT);
+    pidEncoder.SetChanged(KP_ROT);    /* Force display update */
  
     /* Initialize the sensor and setup gain and integration time*/
     if( !sensor.begin() ) {
       PRINT(F("No LSM9DS0 detected. Halting"));
       SHOW_DISPLAY
       
-      /* Blink LED fast for 1 sec  then OFF to show no sensor
-       */
+      /* Blink LED fast for 1 sec  then OFF to show no sensor */
       unsigned long timer = millis();
       while(1) {
           digitalWrite(STATUS_LED,HIGH); // Halt and catch fire
@@ -275,11 +279,11 @@ void setup ( void ) {
     kalmanRollAngle = roll;
 #endif
 
-    /* Initialize PID filter */
-    myPID.SetTunings(KpVal, KiVal, KdVal);
-    myPID.SetMode(AUTOMATIC);
-    myPID.SetSampleTime(LOOP_TIME_MSEC);
-    myPID.SetOutputLimits(-255,255);    // PWM to motors
+//    /* Initialize PID filter */
+//    myPID.SetTunings(KpVal, KiVal, KdVal);
+//    myPID.SetMode(AUTOMATIC);
+//    myPID.SetSampleTime(LOOP_TIME_MSEC);
+//    myPID.SetOutputLimits(-255,255);    // PWM to motors
     
     /*
      * Stutter the wheels for a couple of seconds to let the user know
@@ -291,10 +295,10 @@ void setup ( void ) {
         SetMotors(-STUTTER_MOTOR_AMOUNT,-STUTTER_MOTOR_AMOUNT);
         delay(100);
     }
-    SetMotors(0,0);   // OFF 
+    SetMotors(0,0);   /* OFF */ 
 
 #ifdef DEBUG_TERMINAL
-    PRINTLN(F("***** Starting Balance loop"));
+    PRINTLN(F("Starting Balance loop"));
 #endif
 }
 
@@ -317,7 +321,7 @@ void loop() {
     static unsigned long startTime; 
     static uint8_t secondsCount = 0, quarterSecondsCount = 0;
 
-    /* Loop is approximately 6.05 msec ----- 
+    /* Loop is approximately 6 msec
      * Once I have this running (or at least all coded), I will do a
      * more detailed assesment of the timing. If its under 18msec,
      * then I can use micros() instead of millis() to improve time
@@ -334,7 +338,7 @@ void loop() {
     pitch = atan(-accel.acceleration.x / 
         sqrt(accel.acceleration.y * accel.acceleration.y + 
              accel.acceleration.z * accel.acceleration.z)) * RADS_TO_DEG;
-             
+            
 #ifdef USE_PITCH_AND_ROLL
     roll  = atan2(accel.acceleration.y, accel.acceleration.z) * RADS_TO_DEG;
 
@@ -384,15 +388,17 @@ void loop() {
             /* Compute error between kalmanPitchAngle and targetAngle. Return a 
              * pwmAmount in the range of -255 (full backwards) to 255 (full forwards)
              */
-            myPID.Compute();
+            UpdatePIDandReturnMotorPWM();
+            //myPID.Compute();
             /* How do we inject a turn or movement command into the PID? Break the 
              * PID into PD and PI calculations? To move, we need to set the 
              * angle of the robot to 'lean' into the movement.  Maybe that's how we
              * move. Program a lean angle to cause movement. -Check on this -----
              * If all well and good - set motors to PWM amounts
              */
-            /* Should we watch for runaway conditions? What woulld that entail? */
-            SetMotors(pwmAmount,pwmAmount);
+            /* Should we watch for runaway conditions? What would that entail? */
+            if ( ! rotaryChanging )
+                SetMotors(pwmAmount,pwmAmount);
         }
         
     } /* Done in AutobalanceMode */
@@ -424,7 +430,7 @@ void loop() {
 
 #ifdef DEBUG_TERMINAL
     /* Calculate the average loop time */
-    #define MAX_AVG 500
+    #define MAX_AVG 500   // every 10 seconds...
     static int loopCount = 0;
     static unsigned long avg = 0;
 
@@ -456,7 +462,7 @@ void loop() {
  */
 void SetMotors ( int16_t leftPwmAmount, int16_t rightPwmAmount ) {
 
-    // TODO: Consider direct port writes (PORTx) here. Saves some time
+    /* TODO: Consider direct port writes (PORTx) here. Saves some time */
     
     if ( leftPwmAmount < 0 ) {
         // PORTB &= ~B00000010; 
@@ -481,11 +487,11 @@ void SetMotors ( int16_t leftPwmAmount, int16_t rightPwmAmount ) {
     }                  
 }
 
-#if 0   
+#if 1  
 /* 
  * Simple PID --- may use this instead of PID_v1
  */
-int UpdatePIDandReturnMotorPWM ( void ) {
+void UpdatePIDandReturnMotorPWM ( void ) {
     float deltaError, error;
     
     error = targetAngle - pitch;
@@ -499,7 +505,7 @@ int UpdatePIDandReturnMotorPWM ( void ) {
     deltaError = error - lastError;
     lastError = error;
   
-    return constrain(KpVal * error + 
+    pwmAmount = constrain(KpVal * error + 
                      KiVal * integratedError + 
                      KdVal * deltaError, -255, 255);   // PWM < 0 means go backwards
 }
@@ -512,39 +518,48 @@ int UpdatePIDandReturnMotorPWM ( void ) {
  */
 void CallFourTimesASecond ( void ) {
     bool changed = false;
+    static unsigned long rotaryTimer = millis();
+    
     if ( pidEncoder.SwitchPressed() ) {
-        if ( ++activeRotaryPid > KD_ROT ) activeRotaryPid = KP_ROT;
+        changed = true;
+        if ( ++activeRotaryPid > KD_ROT ) 
+            activeRotaryPid = KP_ROT;
         pidEncoder.SetRotary(activeRotaryPid);
     }
-    if ( pidEncoder.HasRotaryValueChanged(KP_ROT) ) {
+    
+    if ( pidEncoder.HasRotaryValueChanged(KP_ROT) || 
+         pidEncoder.HasRotaryValueChanged(KI_ROT) || 
+         pidEncoder.HasRotaryValueChanged(KD_ROT) ) {
         KpVal = (float)pidEncoder.GetRotaryValue(KP_ROT) * KVALUE_MULTIPLIER;
-        changed = true; 
-    }
-    if ( pidEncoder.HasRotaryValueChanged(KI_ROT) ) {
         KiVal = (float)pidEncoder.GetRotaryValue(KI_ROT) * KVALUE_MULTIPLIER; 
-        changed = true;       
-    }
-    if ( pidEncoder.HasRotaryValueChanged(KD_ROT) ) {
         KdVal = (float)pidEncoder.GetRotaryValue(KD_ROT) * KVALUE_MULTIPLIER;
-        changed = true;        
+        changed = true; 
+        rotaryChanging = true;
+        SetMotors(0,0);
+        rotaryTimer = millis();
     }
 
+    if ( millis() - rotaryTimer >= 1000 )
+        rotaryChanging = false;       /* allow motors to turn back on */
+        
     if ( digitalRead(PID_EEPROM_WRITE) == LOW ) {
-        /* Write PID values to EEPROM */
+        /* Write PID terms to EEPROM */
         EEPROM_writeInt(KP_EEPROM_ADD, (int)(KpVal / KVALUE_MULTIPLIER));
         EEPROM_writeInt(KI_EEPROM_ADD, (int)(KiVal / KVALUE_MULTIPLIER));
         EEPROM_writeInt(KD_EEPROM_ADD, (int)(KdVal / KVALUE_MULTIPLIER));
+        /* Wait for button released - still may bounce */
         while ( digitalRead(PID_EEPROM_WRITE) == LOW ) ;
         CLEAR_DISPLAY
         PRINT(F("PID values stored"));
         SHOW_DISPLAY
-        changed = true;
-        delay(1000);
+        changed = true;   /* Force display update of PID terms */
+        delay(1000);      /* Delay for screen and to debounce switch */
     }
 
 #ifdef OLED_SCREEN
     if ( changed ) {
 #endif
+        /* Update display with new PID terms... */
         CLEAR_DISPLAY
         PRINT(F("Kp: ")); PRINT(KpVal); 
         PRINTLN(activeRotaryPid == KP_ROT ? SELECTED : NOT_SELECTED); 
@@ -553,7 +568,8 @@ void CallFourTimesASecond ( void ) {
         PRINT(F("Kd: ")); PRINT(KdVal);
         PRINTLN(activeRotaryPid == KD_ROT ? SELECTED : NOT_SELECTED); 
         SHOW_DISPLAY
-        myPID.SetTunings(KpVal, KiVal, KdVal);
+        /* ...and update PID itself with the new terms */
+        //myPID.SetTunings(KpVal, KiVal, KdVal);
 #ifdef OLED_SCREEN
     }
 #endif
@@ -571,10 +587,6 @@ void CallFourTimesASecond ( void ) {
     PRINT(F("\tRoll: ")); PRINTLN(kalmanRollAngle);
     PRINT(F("PWM: ")); PRINTLN(pwmAmount);
 #endif
-    /*
-     * What about an autoincrementor for PID values? While a button is pressed
-     * increment the value by 0.01 every XX msec.
-     */
 }  
 
 /*
@@ -586,7 +598,7 @@ void CallEverySecond ( void ) {
 
     /* Do a battery check every 10 seconds */
     batteryReading = analogRead(BATTERY_12V);   // Resistor divider set for 13V max
-    batteryReading = analogRead(SUPPLY_7_5V);            // Resistor divider set for 9V max
+    batteryReading = analogRead(SUPPLY_7_5V);   // Resistor divider set for 9V max
 
     /* Heading and temperature update every second */
 #ifdef DEBUG_TERMINAL
@@ -601,18 +613,18 @@ void CallEverySecond ( void ) {
  * Functions to read / write integer data to EEPROM
  * Thanks http://forum.arduino.cc/index.php?topic=41497.0
  */
-void EEPROM_writeInt ( int ee, int value )
+void EEPROM_writeInt ( int address, int value )
 {
    byte* p = (byte*)(void*)&value;
    for (int i = 0; i < sizeof(value); i++)
-       EEPROM.write(ee++, *p++);
+       EEPROM.write(address++, *p++);
 }
 
-int EEPROM_readInt ( int ee )
+int EEPROM_readInt ( int address )
 {
    int value = 0;
    byte* p = (byte*)(void*)&value;
    for (int i = 0; i < sizeof(value); i++)
-       *p++ = EEPROM.read(ee++);
+       *p++ = EEPROM.read(address++);
    return value;
 }
