@@ -1,13 +1,13 @@
 # Arduino-Self-Balancing-Robot
  Self balancing robot using the Arduino and an LSM9DSO 9 degrees of freedom sensor
  
-##Synopsis
+## Synopsis
 
 This sketch demonstrates a self-balancing robot.
 
-##Theory of Operation
+## Theory of Operation
 
-##Hardware
+## Hardware
 
 The following hardware is used in the design:
 
@@ -21,7 +21,7 @@ The following hardware is used in the design:
 - The processor is an Arduino Nano.
 - The battery is a <TODO: description and part number>.
 
-##API
+## API
 
 Several key libraries are used:
 
